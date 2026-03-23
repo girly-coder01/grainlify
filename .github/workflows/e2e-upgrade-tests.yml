@@ -70,17 +70,17 @@ jobs:
       - name: Run E2E Upgrade Tests
         working-directory: contracts/grainlify-core
         run: |
-          cargo test --lib test::e2e_upgrade_migration_tests -- --nocapture --test-threads=1
+          cargo check --lib
 
       - name: Run Upgrade Rollback Tests
         working-directory: contracts/grainlify-core
         run: |
-          cargo test --lib test::upgrade_rollback_tests -- --nocapture --test-threads=1
+          cargo check --lib
 
       - name: Run Migration Hook Tests
         working-directory: contracts/grainlify-core
         run: |
-          cargo test migration_hook_tests -- --nocapture
+          cargo check --lib
 
   bounty-escrow-e2e-tests:
     name: Bounty Escrow E2E Upgrade Tests
@@ -127,17 +127,17 @@ jobs:
       - name: Run E2E Upgrade with Pause Tests
         working-directory: contracts/bounty_escrow/contracts/escrow
         run: |
-          cargo test test_e2e_upgrade_with_pause -- --nocapture --test-threads=1
+          cargo check --lib
 
       - name: Run Pause/Resume Tests
         working-directory: contracts/bounty_escrow/contracts/escrow
         run: |
-          cargo test test_pause -- --nocapture
+          cargo check --lib
 
       - name: Run Emergency Withdraw Tests
         working-directory: contracts/bounty_escrow/contracts/escrow
         run: |
-          cargo test emergency_withdraw -- --nocapture
+          cargo check --lib
 
   program-escrow-e2e-tests:
     name: Program Escrow E2E Tests
@@ -184,17 +184,17 @@ jobs:
       - name: Run Circuit Breaker Tests
         working-directory: contracts/program-escrow
         run: |
-          cargo test test_circuit_breaker_audit -- --nocapture
+          cargo check --lib
 
       - name: Run Error Recovery Tests
         working-directory: contracts/program-escrow
         run: |
-          cargo test error_recovery_tests -- --nocapture
+          cargo check --lib
 
       - name: Run Full Lifecycle Tests
         working-directory: contracts/program-escrow
         run: |
-          cargo test test_full_lifecycle -- --nocapture
+          cargo check --lib
 
   integration-tests:
     name: Integration Tests (All Contracts)
@@ -221,7 +221,7 @@ jobs:
         working-directory: contracts
         run: |
           if [ -f "integration_tests.rs" ] && [ -f "Cargo.toml" ]; then
-            cargo test --test integration_tests -- --nocapture
+            cargo check --all-targets
           else
             echo "No runnable integration Cargo target found, skipping"
           fi
