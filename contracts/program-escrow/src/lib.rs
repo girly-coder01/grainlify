@@ -1168,7 +1168,7 @@ impl ProgramEscrowContract {
 
         // Get fee configuration
         let fee_config = Self::get_fee_config_internal(&env);
-        
+
         // Calculate fees if enabled
         let (fee_amount, net_amount) = if fee_config.fee_enabled && fee_config.lock_fee_rate > 0 {
             let (fee, net) = token_math::split_amount(amount, fee_config.lock_fee_rate);
@@ -1189,7 +1189,7 @@ impl ProgramEscrowContract {
             .total_funds
             .checked_add(amount)
             .unwrap_or_else(|| panic!("Total funds overflow"));
-        
+
         program_data.remaining_balance = program_data
             .remaining_balance
             .checked_add(net_amount)
