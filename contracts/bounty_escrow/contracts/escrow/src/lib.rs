@@ -436,6 +436,69 @@ mod anti_abuse {
     }
 }
 
+/// Role-Based Access Control (RBAC) helpers.
+///
+/// # Role Matrix
+///
+/// | Action                  | Admin | Operator (anti-abuse admin) | Participant (depositor) |
+/// |-------------------------|-------|-----------------------------|-------------------------|
+/// | `init`                  | ✓     | ✗                           | ✗                       |
+/// | `set_paused`            | ✓     | ✗                           | ✗                       |
+/// | `emergency_withdraw`    | ✓     | ✗                           | ✗                       |
+/// | `update_fee_config`     | ✓     | ✗                           | ✗                       |
+/// | `set_maintenance_mode`  | ✓     | ✗                           | ✗                       |
+/// | `set_deprecated`        | ✓     | ✗                           | ✗                       |
+/// | `release_funds`         | ✓     | ✗                           | ✗                       |
+/// | `approve_refund`        | ✓     | ✗                           | ✗                       |
+/// | `partial_release`       | ✓     | ✗                           | ✗                       |
+/// | `set_anti_abuse_admin`  | ✓     | ✗                           | ✗                       |
+/// | `set_whitelist_entry`   | ✓     | ✓ (via anti-abuse admin)    | ✗                       |
+/// | `set_blocklist_entry`   | ✓     | ✓ (via anti-abuse admin)    | ✗                       |
+/// | `set_filter_mode`       | ✓     | ✗                           | ✗                       |
+/// | `update_anti_abuse_cfg` | ✓     | ✗                           | ✗                       |
+/// | `lock_funds`            | ✗     | ✗                           | ✓ (self only)           |
+/// | `refund`                | ✓+✓   | ✗                           | ✓ (co-sign)             |
+///
+/// # Security Invariants
+/// - No privilege escalation: operators cannot call admin-only functions.
+/// - No cross-call escalation: a participant cannot trigger admin actions indirectly.
+/// - `refund` requires both admin AND depositor signatures (dual-auth).
+pub mod rbac {
+    use soroban_sdk::{Address, Env};
+
+    use crate::DataKey;
+
+    /// Returns the stored admin address, panicking if not initialized.
+    pub fn require_admin(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Admin)
+            .expect("contract not initialized")
+    }
+
+    /// Asserts that `caller` is the stored admin. Panics otherwise.
+    pub fn assert_admin(env: &Env, caller: &Address) {
+        let admin = require_admin(env);
+        assert_eq!(&admin, caller, "caller is not admin");
+        caller.require_auth();
+    }
+
+    /// Returns `true` if `addr` is the stored admin.
+    pub fn is_admin(env: &Env, addr: &Address) -> bool {
+        env.storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::Admin)
+            .map(|a| &a == addr)
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` if `addr` is the stored anti-abuse (operator) admin.
+    pub fn is_operator(env: &Env, addr: &Address) -> bool {
+        use crate::anti_abuse;
+        anti_abuse::get_admin(env).map(|a| &a == addr).unwrap_or(false)
+    }
+}
+
 #[allow(dead_code)]
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
@@ -650,6 +713,7 @@ pub struct EscrowInfo {
 pub enum DataKey {
     Admin,
     Token,
+    Version,
     Escrow(u64),     // bounty_id
     EscrowAnon(u64), // bounty_id anonymous escrow variant
     Metadata(u64),
@@ -859,19 +923,38 @@ pub struct RefundRecord {
     pub mode: RefundMode,
 }
 
+/// A single escrow entry to lock within a [`BountyEscrowContract::batch_lock_funds`] call.
+///
+/// All items in a batch are sorted by ascending `bounty_id` before processing to ensure
+/// deterministic execution order. If any item fails validation, the entire batch reverts.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LockFundsItem {
+    /// Unique identifier for the bounty. Must not already exist in persistent storage
+    /// and must not appear more than once within the same batch (`DuplicateBountyId`).
     pub bounty_id: u64,
+    /// Address of the depositor. Tokens are transferred **from** this address.
+    /// `require_auth()` is called once per unique depositor across the batch.
     pub depositor: Address,
+    /// Gross amount (in token base units) to lock into escrow. Must be `> 0`.
+    /// If an `AmountPolicy` is active, the value must fall within `[min_amount, max_amount]`.
     pub amount: i128,
+    /// Unix timestamp (seconds) after which the depositor may claim a refund
+    /// without requiring admin approval. Must be in the future at lock time.
     pub deadline: u64,
 }
 
+/// A single escrow release entry within a [`BountyEscrowContract::batch_release_funds`] call.
+///
+/// All items in a batch are sorted by ascending `bounty_id` before processing to ensure
+/// deterministic execution order. If any item fails validation, the entire batch reverts.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseFundsItem {
+    /// Identifier of the bounty to release. The escrow record must exist (`BountyNotFound`)
+    /// and must be in `Locked` status (`FundsNotLocked`).
     pub bounty_id: u64,
+    /// Address of the contributor who will receive the released tokens.
     pub contributor: Address,
 }
 
@@ -954,6 +1037,7 @@ impl BountyEscrowContract {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
+        env.storage().instance().set(&DataKey::Version, &1u32);
 
         events::emit_bounty_initialized(
             &env,
@@ -994,6 +1078,25 @@ impl BountyEscrowContract {
         env: Env,
     ) -> (Option<soroban_sdk::String>, Option<soroban_sdk::String>) {
         (Self::get_chain_id(env.clone()), Self::get_network_id(env))
+    }
+
+    /// Return the persisted contract version.
+    pub fn get_version(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::Version).unwrap_or(0)
+    }
+
+    /// Update the persisted contract version (admin only).
+    pub fn set_version(env: Env, new_version: u32) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::Version, &new_version);
+        Ok(())
     }
 
     /// Calculate fee amount based on rate (in basis points), using **ceiling division**.
@@ -4062,30 +4165,57 @@ impl BountyEscrowContract {
         ))
     }
 
-    /// Batch lock funds for multiple bounties in a single transaction.
-    /// This improves gas efficiency by reducing transaction overhead.
+    /// Batch lock funds for multiple bounties in a single atomic transaction.
+    ///
+    /// Locks between 1 and [`MAX_BATCH_SIZE`] bounties in one call, reducing
+    /// per-transaction overhead compared to repeated single-item `lock_funds`
+    /// calls.
+    ///
+    /// ## Batch failure semantics
+    ///
+    /// This operation is **strictly atomic** (all-or-nothing):
+    ///
+    /// 1. All items are validated in a single pass **before** any state is
+    ///    mutated or any token transfer is initiated.
+    /// 2. If *any* item fails validation the entire call reverts immediately.
+    ///    No escrow record is written, no token is transferred, and every
+    ///    "sibling" row in the same batch is left completely unaffected.
+    /// 3. After a failed batch the contract is in exactly the same state as
+    ///    before the call; subsequent operations behave as if this call never
+    ///    happened.
+    ///
+    /// ## Ordering guarantee
+    ///
+    /// Items are processed in ascending `bounty_id` order regardless of the
+    /// caller-supplied ordering. This ensures deterministic execution and
+    /// eliminates ordering-based front-running attacks.
+    ///
+    /// ## Checks-Effects-Interactions (CEI)
+    ///
+    /// All escrow records and index updates are written in a first pass
+    /// (Effects); external token transfers and event emissions happen in a
+    /// second pass (Interactions). This ordering prevents reentrancy attacks.
     ///
     /// # Arguments
-    /// * `items` - Vector of LockFundsItem containing bounty_id, depositor, amount, and deadline
+    /// * `items` - 1–[`MAX_BATCH_SIZE`] [`LockFundsItem`] entries (bounty_id,
+    ///   depositor, amount, deadline).
     ///
     /// # Returns
-    /// Number of successfully locked bounties
+    /// Number of bounties successfully locked (equals `items.len()` on success).
     ///
     /// # Errors
-    /// * InvalidBatchSize - if batch size exceeds MAX_BATCH_SIZE or is zero
-    /// * BountyExists - if any bounty_id already exists
-    /// * NotInitialized - if contract is not initialized
+    /// * [`Error::InvalidBatchSize`] — batch is empty or exceeds `MAX_BATCH_SIZE`
+    /// * [`Error::ContractDeprecated`] — contract has been killed via `set_deprecated`
+    /// * [`Error::FundsPaused`] — lock operations are currently paused
+    /// * [`Error::NotInitialized`] — `init` has not been called
+    /// * [`Error::BountyExists`] — a `bounty_id` already exists in storage
+    /// * [`Error::DuplicateBountyId`] — the same `bounty_id` appears more than once
+    /// * [`Error::InvalidAmount`] — any item has `amount ≤ 0`
+    /// * [`Error::ParticipantBlocked`] / [`Error::ParticipantNotAllowed`] — participant filter
     ///
-    /// # Ordering Guarantee
-    /// Items are processed in ascending `bounty_id` order, regardless of caller
-    /// input ordering.
-    ///
-    /// # Note
-    /// This operation is atomic - if any item fails, the entire transaction
-    /// reverts.
     /// # Reentrancy
-    /// Protected by the shared reentrancy guard. All escrow records are
-    /// written first; token transfers happen in a second pass (CEI).
+    /// Protected by the shared reentrancy guard (acquired before validation,
+    /// released after all effects and interactions complete).
     pub fn batch_lock_funds(env: Env, items: Vec<LockFundsItem>) -> Result<u32, Error> {
         if Self::check_paused(&env, symbol_short!("lock")) {
             return Err(Error::FundsPaused);
@@ -4237,37 +4367,73 @@ impl BountyEscrowContract {
             Ok(locked_count)
         })();
 
+        emit_batch_funds_locked(
+            &env,
+            BatchFundsLocked {
+                count: locked_count,
+                total_amount: ordered_items
+                    .iter()
+                    .try_fold(0i128, |acc, i| acc.checked_add(i.amount))
+                    .unwrap(),
+                timestamp,
+            },
+        );
+
         // GUARD: release reentrancy lock
         reentrancy_guard::release(&env);
+        Ok(locked_count)
         result
     }
 
-    /// Batch release funds to multiple contributors in a single transaction.
-    /// This improves gas efficiency by reducing transaction overhead.
+    /// Batch release funds to multiple contributors in a single atomic transaction.
+    ///
+    /// Releases between 1 and [`MAX_BATCH_SIZE`] bounties in one admin-authorised
+    /// call, reducing per-transaction overhead compared to repeated single-item
+    /// `release_funds` calls.
+    ///
+    /// ## Batch failure semantics
+    ///
+    /// This operation is **strictly atomic** (all-or-nothing):
+    ///
+    /// 1. All items are validated in a single pass **before** any escrow status
+    ///    is updated or any token transfer is initiated.
+    /// 2. If *any* item fails validation the entire call reverts immediately.
+    ///    No status is changed, no token leaves the contract, and every
+    ///    "sibling" row in the same batch is left completely unaffected.
+    /// 3. After a failed batch the contract is in exactly the same state as
+    ///    before the call; subsequent operations behave as if this call never
+    ///    happened.
+    ///
+    /// ## Ordering guarantee
+    ///
+    /// Items are processed in ascending `bounty_id` order regardless of the
+    /// caller-supplied ordering, ensuring deterministic execution.
+    ///
+    /// ## Checks-Effects-Interactions (CEI)
+    ///
+    /// All escrow statuses are updated to `Released` in a first pass (Effects);
+    /// external token transfers and event emissions happen in a second pass
+    /// (Interactions).
     ///
     /// # Arguments
-    /// * `items` - Vector of ReleaseFundsItem containing bounty_id and contributor address
+    /// * `items` - 1–[`MAX_BATCH_SIZE`] [`ReleaseFundsItem`] entries (bounty_id,
+    ///   contributor address).
     ///
     /// # Returns
-    /// Number of successfully released bounties
+    /// Number of bounties successfully released (equals `items.len()` on success).
     ///
     /// # Errors
-    /// * InvalidBatchSize - if batch size exceeds MAX_BATCH_SIZE or is zero
-    /// * BountyNotFound - if any bounty_id doesn't exist
-    /// * FundsNotLocked - if any bounty is not in Locked status
-    /// * Unauthorized - if caller is not admin
+    /// * [`Error::InvalidBatchSize`] — batch is empty or exceeds `MAX_BATCH_SIZE`
+    /// * [`Error::FundsPaused`] — release operations are currently paused
+    /// * [`Error::NotInitialized`] — `init` has not been called
+    /// * [`Error::Unauthorized`] — caller is not the admin
+    /// * [`Error::BountyNotFound`] — a `bounty_id` does not exist in storage
+    /// * [`Error::FundsNotLocked`] — a bounty's status is not `Locked`
+    /// * [`Error::DuplicateBountyId`] — the same `bounty_id` appears more than once
     ///
-    /// # Ordering Guarantee
-    /// Items are processed in ascending `bounty_id` order, regardless of caller
-    /// input ordering.
-    ///
-    /// # Note
-    /// This operation is atomic - if any item fails, the entire transaction
-    /// reverts.
     /// # Reentrancy
-    /// Protected by the shared reentrancy guard. All escrow records are
-    /// updated to `Released` first; token transfers happen in a second
-    /// pass (CEI).
+    /// Protected by the shared reentrancy guard (acquired before validation,
+    /// released after all effects and interactions complete).
     pub fn batch_release_funds(env: Env, items: Vec<ReleaseFundsItem>) -> Result<u32, Error> {
         if Self::check_paused(&env, symbol_short!("release")) {
             return Err(Error::FundsPaused);
@@ -4452,93 +4618,24 @@ impl BountyEscrowContract {
             .ok_or(Error::BountyNotFound)
     }
 
-    /// Set notification preferences for an escrow. The admin or the escrow creator may update
-    /// preferences. For anonymous escrows, only the admin is allowed.
-    pub fn set_notification_preferences(
-        env: Env,
-        actor: Address,
-        bounty_id: u64,
-        prefs: u32,
-    ) -> Result<EscrowMetadata, Error> {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-
-        let escrow = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Escrow>(&DataKey::Escrow(bounty_id));
-        let escrow_anon_exists = env
-            .storage()
-            .persistent()
-            .has(&DataKey::EscrowAnon(bounty_id));
-
-        if escrow.is_none() && !escrow_anon_exists {
-            return Err(Error::BountyNotFound);
-        }
-
-        let actor = if escrow_anon_exists {
-            if actor != admin {
-                return Err(Error::Unauthorized);
-            }
-            actor
-        } else if let Some(ref escrow) = escrow {
-            if actor != admin && actor != escrow.depositor {
-                return Err(Error::Unauthorized);
-            }
-            actor
-        } else {
-            actor
-        };
-
-        actor.require_auth();
-
-        let (previous_prefs, mut metadata, created) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, EscrowMetadata>(&DataKey::Metadata(bounty_id))
-            .map(|metadata| (metadata.notification_prefs, metadata, false))
-            .unwrap_or((
-                0,
-                EscrowMetadata {
-                    repo_id: 0,
-                    issue_id: 0,
-                    bounty_type: soroban_sdk::String::from_str(&env, ""),
-                    risk_flags: 0,
-                    notification_prefs: 0,
-                    reference_hash: None,
-                },
-                true,
-            ));
-
-        metadata.notification_prefs = prefs;
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Metadata(bounty_id), &metadata);
-
-        emit_notification_preferences_updated(
-            &env,
-            NotificationPreferencesUpdated {
-                version: EVENT_VERSION_V2,
-                bounty_id,
-                previous_prefs,
-                new_prefs: metadata.notification_prefs,
-                actor,
-                created,
-                timestamp: env.ledger().timestamp(),
-            },
-        );
-
-        Ok(metadata)
-    }
-
-    pub fn get_notification_preferences(env: Env, bounty_id: u64) -> Result<u32, Error> {
-        Ok(Self::get_metadata(env, bounty_id)?.notification_prefs)
-    }
-
+    /// Build the context bytes that feed into the deterministic PRNG.
+    ///
+    /// The context binds selection to the current contract address, bounty
+    /// parameters, **ledger timestamp**, and the monotonic ticket counter.
+    /// Changing any of these inputs produces a completely different SHA-256
+    /// digest and therefore a different winner.
+    ///
+    /// # Ledger inputs included
+    /// - `env.ledger().timestamp()` — ties the result to the block that
+    ///   executes the transaction.
+    /// - `TicketCounter` — monotonically increasing; prevents two calls
+    ///   within the same ledger close from producing identical context.
+    ///
+    /// # Predictability limits
+    /// Because the ledger timestamp is known to validators before block
+    /// close, a validator-level adversary can predict the outcome for a
+    /// given external seed.  See `DETERMINISTIC_RANDOMNESS.md` for the
+    /// full threat model.
     fn build_claim_selection_context(
         env: &Env,
         bounty_id: u64,
@@ -4566,7 +4663,20 @@ impl BountyEscrowContract {
     /// Deterministically derive the winner index for claim ticket issuance.
     ///
     /// This is a pure/view helper that lets clients verify expected results
-    /// before issuing a ticket.
+    /// before issuing a ticket.  The index is computed via per-candidate
+    /// SHA-256 scoring (see `grainlify_core::pseudo_randomness`), making
+    /// the result **order-independent** — shuffling `candidates` does not
+    /// change which address is selected.
+    ///
+    /// # Arguments
+    /// * `bounty_id` — Bounty whose context seeds the PRNG.
+    /// * `candidates` — Non-empty list of eligible addresses.
+    /// * `amount` — Claim amount mixed into the context hash.
+    /// * `expires_at` — Ticket expiry mixed into the context hash.
+    /// * `external_seed` — Caller-provided 32-byte seed.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidSelectionInput` when `candidates` is empty.
     pub fn derive_claim_ticket_winner_index(
         env: Env,
         bounty_id: u64,
@@ -4591,7 +4701,14 @@ impl BountyEscrowContract {
         Ok(selection.index)
     }
 
-    /// Deterministically derive the winner address for claim ticket issuance.
+    /// Deterministically derive the winner **address** for claim ticket issuance.
+    ///
+    /// Convenience wrapper around [`Self::derive_claim_ticket_winner_index`]
+    /// that resolves the winning index back to an `Address`.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidSelectionInput` when `candidates` is empty or
+    /// the resolved index is out of bounds.
     pub fn derive_claim_ticket_winner(
         env: Env,
         bounty_id: u64,
@@ -4611,11 +4728,24 @@ impl BountyEscrowContract {
         candidates.get(index).ok_or(Error::InvalidSelectionInput)
     }
 
-    /// Deterministically select a winner from `candidates` and issue claim ticket.
+    /// Deterministically select a winner from `candidates` and issue a claim ticket.
     ///
-    /// Security notes:
-    /// - Deterministic and verifiable from published inputs.
-    /// - Not unbiased randomness; callers can still influence context/seed choices.
+    /// Combines [`Self::derive_claim_ticket_winner`] with
+    /// [`Self::issue_claim_ticket`] in a single atomic call.  Emits a
+    /// `DeterministicSelectionDerived` event containing the seed hash,
+    /// winner score, and selected index for off-chain auditability.
+    ///
+    /// # Security notes
+    /// - **Deterministic and verifiable** — any observer can replay the
+    ///   selection from the published event fields.
+    /// - **Not unbiased randomness** — callers who control both the
+    ///   external seed and submission timing can influence outcomes.
+    ///   See `DETERMINISTIC_RANDOMNESS.md` for mitigation guidance.
+    /// - The selection is **order-independent**: candidate list ordering
+    ///   does not affect which address wins.
+    ///
+    /// # Errors
+    /// Returns `Error::InvalidSelectionInput` when `candidates` is empty.
     pub fn issue_claim_ticket_deterministic(
         env: Env,
         bounty_id: u64,
@@ -4902,6 +5032,26 @@ impl traits::EscrowInterface for BountyEscrowContract {
         BountyEscrowContract::release_funds(env.clone(), bounty_id, contributor)
     }
 
+    /// Partial release through the trait interface
+    fn partial_release(
+        env: &Env,
+        bounty_id: u64,
+        contributor: Address,
+        payout_amount: i128,
+    ) -> Result<(), crate::Error> {
+        BountyEscrowContract::partial_release(env.clone(), bounty_id, contributor, payout_amount)
+    }
+
+    /// Batch lock funds through the trait interface
+    fn batch_lock_funds(env: &Env, items: Vec<LockFundsItem>) -> Result<u32, crate::Error> {
+        BountyEscrowContract::batch_lock_funds(env.clone(), items)
+    }
+
+    /// Batch release funds through the trait interface
+    fn batch_release_funds(env: &Env, items: Vec<ReleaseFundsItem>) -> Result<u32, crate::Error> {
+        BountyEscrowContract::batch_release_funds(env.clone(), items)
+    }
+
     /// Refund funds to depositor through the trait interface
     fn refund(env: &Env, bounty_id: u64) -> Result<(), crate::Error> {
         BountyEscrowContract::refund(env.clone(), bounty_id)
@@ -4921,14 +5071,12 @@ impl traits::EscrowInterface for BountyEscrowContract {
 impl traits::UpgradeInterface for BountyEscrowContract {
     /// Get contract version
     fn get_version(env: &Env) -> u32 {
-        1 // Current version
+        BountyEscrowContract::get_version(env.clone())
     }
 
     /// Set contract version (admin only)
-    fn set_version(env: &Env, _new_version: u32) -> Result<(), soroban_sdk::String> {
-        // Version management - reserved for future use
-        // Currently, version is hardcoded to 1
-        Ok(())
+    fn set_version(env: &Env, new_version: u32) -> Result<(), crate::Error> {
+        BountyEscrowContract::set_version(env.clone(), new_version)
     }
 }
 
@@ -5445,3 +5593,7 @@ mod test_serialization_compatibility;
 mod test_status_transitions;
 #[cfg(test)]
 mod test_upgrade_scenarios;
+#[cfg(test)]
+mod test_batch_failure_mode;
+#[cfg(test)]
+mod test_batch_failure_modes;

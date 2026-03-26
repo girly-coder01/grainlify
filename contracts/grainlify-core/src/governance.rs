@@ -47,60 +47,81 @@ pub enum VotingScheme {
 #[derive(Clone, Debug)]
 #[contracttype]
 pub struct Proposal {
+    /// Sequential proposal identifier.
     pub id: u32,
+    /// Address that created the proposal.
     pub proposer: Address,
+    /// WASM hash proposed for execution.
     pub new_wasm_hash: BytesN<32>,
+    /// Short proposal description.
     pub description: Symbol,
+    /// Ledger timestamp when the proposal was created.
     pub created_at: u64,
+    /// Ledger timestamp when voting begins.
     pub voting_start: u64,
+    /// Ledger timestamp when voting ends.
     pub voting_end: u64,
+    /// Delay between approval and execution.
     pub execution_delay: u64,
+    /// Current proposal status.
     pub status: ProposalStatus,
+    /// Weighted votes in favor.
     pub votes_for: i128,
+    /// Weighted votes against.
     pub votes_against: i128,
+    /// Weighted abstain votes.
     pub votes_abstain: i128,
+    /// Number of unique votes cast.
     pub total_votes: u32,
     pub stake_amount: i128,
 }
 
-/// Configuration parameters for the governance system.
-#[derive(Clone, Debug)]
+/// Immutable governance parameters set during `init_governance`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct GovernanceConfig {
-    /// Duration of the voting period in seconds.
+    /// Voting period in ledger seconds.
     pub voting_period: u64,
-    /// Delay required after approval before execution in seconds.
+    /// Delay after approval before execution may occur.
     pub execution_delay: u64,
-    /// Minimum percentage of total supply required to vote (in bps, e.g., 1000 = 10%).
+    /// Minimum quorum in basis points, where `10_000 == 100%`.
     pub quorum_percentage: u32,
-    /// Minimum percentage of 'For' votes vs ('For' + 'Against') to pass (in bps).
+    /// Minimum approval ratio in basis points, where `10_000 == 100%`.
     pub approval_threshold: u32,
-    /// Minimum tokens required to be staked to create a proposal.
+    /// Minimum stake required to create a proposal.
     pub min_proposal_stake: i128,
-    /// The scheme used to calculate voting power.
+    /// Voting power model to apply.
     pub voting_scheme: VotingScheme,
     /// The token used for staking and weighted voting.
     pub governance_token: Address,
 }
 
-/// Record of a single vote cast by an address.
-#[derive(Clone, Debug)]
+/// Recorded vote for a governance proposal.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Vote {
+    /// Address that cast the vote.
     pub voter: Address,
+    /// Proposal identifier the vote belongs to.
     pub proposal_id: u32,
+    /// Direction of the vote.
     pub vote_type: VoteType,
+    /// Voting power applied to this vote.
     pub voting_power: i128,
+    /// Ledger timestamp when the vote was cast.
     pub timestamp: u64,
 }
 
-// Storage keys
+/// Storage key containing the proposal map.
 pub const PROPOSALS: Symbol = symbol_short!("PROPOSALS");
+/// Storage key containing the next governance proposal id.
 pub const PROPOSAL_COUNT: Symbol = symbol_short!("PROP_CNT");
+/// Storage key containing recorded votes.
 pub const VOTES: Symbol = symbol_short!("VOTES");
+/// Storage key containing the immutable governance configuration.
 pub const GOVERNANCE_CONFIG: Symbol = symbol_short!("GOV_CFG");
 
-/// Governance errors aligned with user-visible failures.
+/// Governance errors returned by the standalone governance contract.
 #[soroban_sdk::contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -137,39 +158,38 @@ pub enum Error {
     InsufficientBalance = 15,
 }
 
+/// Validates the immutable governance configuration used during initialization.
+pub(crate) fn validate_config(config: &GovernanceConfig) -> Result<(), Error> {
+    if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
+        return Err(Error::InvalidThreshold);
+    }
+
+    if config.approval_threshold < 5000 {
+        return Err(Error::ThresholdTooLow);
+    }
+
+    Ok(())
+}
+
 #[contract]
 pub struct GovernanceContract;
 
 #[contractimpl]
 impl GovernanceContract {
-    /// Initializes the governance system with the provided configuration.
-    ///
-    /// # Arguments
-    /// * `admin` - Authorized address to initialize the system.
-    /// * `config` - Configuration parameters.
+    /// Initializes governance state for the standalone governance contract.
     pub fn init_governance(
         env: Env,
         admin: Address,
         config: GovernanceConfig,
     ) -> Result<(), Error> {
         admin.require_auth();
-        if config.quorum_percentage > 10000 || config.approval_threshold > 10000 {
-            return Err(Error::InvalidThreshold);
-        }
-        if config.approval_threshold < 5000 {
-            return Err(Error::ThresholdTooLow);
-        }
+        validate_config(&config)?;
         env.storage().instance().set(&GOVERNANCE_CONFIG, &config);
         env.storage().instance().set(&PROPOSAL_COUNT, &0u32);
         Ok(())
     }
 
     /// Creates a new governance proposal.
-    ///
-    /// # Arguments
-    /// * `proposer` - Address creating the proposal.
-    /// * `new_wasm_hash` - The hash of the new WASM code to be upgraded.
-    /// * `description` - A short description symbol for the proposal.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -236,12 +256,7 @@ impl GovernanceContract {
         Ok(proposal_id)
     }
 
-    /// Casts a vote on an active proposal.
-    ///
-    /// # Arguments
-    /// * `voter` - Address casting the vote.
-    /// * `proposal_id` - ID of the proposal to vote on.
-    /// * `vote_type` - The choice (For, Against, Abstain).
+    /// Casts a vote for an active proposal.
     pub fn cast_vote(
         env: Env,
         voter: Address,
@@ -322,10 +337,7 @@ impl GovernanceContract {
         Ok(())
     }
 
-    /// Finalizes a proposal after the voting period has ended.
-    ///
-    /// # Arguments
-    /// * `proposal_id` - ID of the proposal to finalize.
+    /// Finalizes a proposal after the voting window has closed.
     pub fn finalize_proposal(env: Env, proposal_id: u32) -> Result<ProposalStatus, Error> {
         let mut proposals: Map<u32, Proposal> = env
             .storage()
