@@ -153,6 +153,7 @@ const PAYOUT: Symbol = symbol_short!("Payout");
 const EVENT_VERSION_V2: u32 = 2;
 const PAUSE_STATE_CHANGED: Symbol = symbol_short!("PauseSt");
 const MAINTENANCE_MODE_CHANGED: Symbol = symbol_short!("MaintSt");
+const READ_ONLY_MODE_CHANGED: Symbol = symbol_short!("ROModeChg");
 const PROGRAM_RISK_FLAGS_UPDATED: Symbol = symbol_short!("pr_risk");
 const PROGRAM_REGISTRY: Symbol = symbol_short!("ProgReg");
 const PROGRAM_REGISTERED: Symbol = symbol_short!("ProgRgd");
@@ -374,6 +375,7 @@ pub enum DataKey {
     PauseFlags,                      // PauseFlags struct
     RateLimitConfig,                 // RateLimitConfig struct
     MaintenanceMode,                 // bool flag
+    ReadOnlyMode,                    // bool flag — blocks all state mutations
     ProgramDependencies(String),     // program_id -> Vec<String>
     DependencyStatus(String),        // program_id -> DependencyStatus
 }
@@ -405,6 +407,15 @@ pub struct MaintenanceModeChanged {
     pub enabled: bool,
     pub admin: Address,
     pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadOnlyModeChanged {
+    pub enabled: bool,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub reason: Option<String>,
 }
 
 #[contracttype]
@@ -613,7 +624,13 @@ mod test_lifecycle;
 #[cfg(test)]
 mod test_full_lifecycle;
 
+#[cfg(test)]
 mod test_maintenance_mode;
+
+#[cfg(test)]
+mod test_read_only_mode;
+
+#[cfg(test)]
 mod test_risk_flags;
 #[cfg(test)]
 #[cfg(test)]
@@ -741,6 +758,11 @@ impl ProgramEscrowContract {
             env.storage()
                 .instance()
                 .set(&DataKey::MaintenanceMode, &false);
+        }
+        if !env.storage().instance().has(&DataKey::ReadOnlyMode) {
+            env.storage()
+                .instance()
+                .set(&DataKey::ReadOnlyMode, &false);
         }
         if !env.storage().instance().has(&DataKey::PauseFlags) {
             env.storage().instance().set(
@@ -959,15 +981,19 @@ impl ProgramEscrowContract {
     pub fn lock_program_funds(env: Env, amount: i128) -> ProgramData {
         // Validation precedence (deterministic ordering):
         // 1. Contract initialized
-        // 2. Paused (operational state)
-        // 3. Input validation (amount)
+        // 2. Read-only mode
+        // 3. Paused (operational state)
+        // 4. Input validation (amount)
 
         // 1. Contract must be initialized
         if !env.storage().instance().has(&PROGRAM_DATA) {
             panic!("Program not initialized");
         }
 
-        // 2. Operational state: paused
+        // 2. Read-only mode
+        Self::require_not_read_only(&env);
+
+        // 3. Operational state: paused
         if Self::check_paused(&env, symbol_short!("lock")) {
             panic!("Funds Paused");
         }
@@ -1018,6 +1044,9 @@ impl ProgramEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::MaintenanceMode, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::ReadOnlyMode, &false);
         env.storage().instance().set(
             &DataKey::PauseFlags,
             &PauseFlags {
@@ -1097,6 +1126,7 @@ impl ProgramEscrowContract {
     /// Set risk flags for a program (admin only).
     pub fn set_program_risk_flags(env: Env, program_id: String, flags: u32) -> ProgramData {
         let admin = Self::require_admin(&env);
+        Self::require_not_read_only(&env);
         let mut program_data = Self::get_program_data_by_id(&env, &program_id);
         let previous_flags = program_data.risk_flags;
         program_data.risk_flags = flags;
@@ -1120,6 +1150,7 @@ impl ProgramEscrowContract {
     /// Clear specific risk flags for a program (admin only).
     pub fn clear_program_risk_flags(env: Env, program_id: String, flags: u32) -> ProgramData {
         let admin = Self::require_admin(&env);
+        Self::require_not_read_only(&env);
         let mut program_data = Self::get_program_data_by_id(&env, &program_id);
         let previous_flags = program_data.risk_flags;
         program_data.risk_flags &= !flags;
@@ -1161,6 +1192,7 @@ impl ProgramEscrowContract {
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        Self::require_not_read_only(&env);
 
         let mut flags = Self::get_pause_flags(&env);
         let timestamp = env.ledger().timestamp();
@@ -1246,6 +1278,7 @@ impl ProgramEscrowContract {
         }
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        Self::require_not_read_only(&env);
 
         env.storage()
             .instance()
@@ -1260,6 +1293,51 @@ impl ProgramEscrowContract {
         );
     }
 
+    /// Returns true if the contract is in read-only mode.
+    pub fn is_read_only(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReadOnlyMode)
+            .unwrap_or(false)
+    }
+
+    /// Enable or disable contract-wide read-only mode (admin only).
+    ///
+    /// When enabled, all state-mutating entrypoints reject with "Read-only mode"
+    /// while view calls remain fully functional. Intended for indexer backfills
+    /// and major audits where concurrent writes must be prevented.
+    pub fn set_read_only_mode(env: Env, enabled: bool, reason: Option<String>) {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic!("Not initialized");
+        }
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ReadOnlyMode, &enabled);
+        env.events().publish(
+            (READ_ONLY_MODE_CHANGED,),
+            ReadOnlyModeChanged {
+                enabled,
+                admin,
+                timestamp: env.ledger().timestamp(),
+                reason,
+            },
+        );
+    }
+
+    fn require_not_read_only(env: &Env) {
+        let read_only: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReadOnlyMode)
+            .unwrap_or(false);
+        if read_only {
+            panic!("Read-only mode");
+        }
+    }
+
     /// Emergency withdraw all program funds (admin only, must have lock_paused = true)
     pub fn emergency_withdraw(env: Env, target: Address) {
         if !env.storage().instance().has(&DataKey::Admin) {
@@ -1267,6 +1345,7 @@ impl ProgramEscrowContract {
         }
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        Self::require_not_read_only(&env);
 
         let flags = Self::get_pause_flags(&env);
         if !flags.lock_paused {
@@ -1372,6 +1451,7 @@ impl ProgramEscrowContract {
         // Only admin can update rate limit config
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+        Self::require_not_read_only(&env);
 
         let config = RateLimitConfig {
             window_size,
@@ -1412,6 +1492,7 @@ impl ProgramEscrowContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic!("Not initialized"));
         admin.require_auth();
+        Self::require_not_read_only(&env);
     }
     // ========================================================================
     // Payout Functions
@@ -1429,10 +1510,11 @@ impl ProgramEscrowContract {
         // Validation precedence (deterministic ordering):
         // 1. Reentrancy guard
         // 2. Contract initialized
-        // 3. Paused (operational state)
-        // 4. Authorization
-        // 5. Input validation (batch size, amounts)
-        // 6. Business logic (sufficient balance)
+        // 3. Read-only mode
+        // 4. Paused (operational state)
+        // 5. Authorization
+        // 6. Input validation (batch size, amounts)
+        // 7. Business logic (sufficient balance)
 
         // 1. Reentrancy guard
         reentrancy_guard::check_not_entered(&env);
@@ -1448,13 +1530,24 @@ impl ProgramEscrowContract {
                 panic!("Program not initialized")
             });
 
-        // 3. Operational state: paused
+        // 3. Read-only mode
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::ReadOnlyMode)
+            .unwrap_or(false)
+        {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Read-only mode");
+        }
+
+        // 4. Operational state: paused
         if Self::check_paused(&env, symbol_short!("release")) {
             reentrancy_guard::clear_entered(&env);
             panic!("Funds Paused");
         }
 
-        // 4. Authorization
+        // 5. Authorization
         program_data.authorized_payout_key.require_auth();
 
         // 5. Input validation
@@ -1547,10 +1640,11 @@ impl ProgramEscrowContract {
         // Validation precedence (deterministic ordering):
         // 1. Reentrancy guard
         // 2. Contract initialized
-        // 3. Paused (operational state)
-        // 4. Authorization
-        // 5. Input validation (amount)
-        // 6. Business logic (sufficient balance)
+        // 3. Read-only mode
+        // 4. Paused (operational state)
+        // 5. Authorization
+        // 6. Input validation (amount)
+        // 7. Business logic (sufficient balance)
 
         // 1. Reentrancy guard
         reentrancy_guard::check_not_entered(&env);
@@ -1566,13 +1660,24 @@ impl ProgramEscrowContract {
                 panic!("Program not initialized")
             });
 
-        // 3. Operational state: paused
+        // 3. Read-only mode
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::ReadOnlyMode)
+            .unwrap_or(false)
+        {
+            reentrancy_guard::clear_entered(&env);
+            panic!("Read-only mode");
+        }
+
+        // 4. Operational state: paused
         if Self::check_paused(&env, symbol_short!("release")) {
             reentrancy_guard::clear_entered(&env);
             panic!("Funds Paused");
         }
 
-        // 4. Authorization
+        // 5. Authorization
         program_data.authorized_payout_key.require_auth();
 
         // 5. Input validation

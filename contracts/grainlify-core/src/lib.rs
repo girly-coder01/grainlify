@@ -518,6 +518,9 @@ enum DataKey {
 
     /// Network identifier
     NetworkId,
+
+    /// Read-only mode flag — blocks all state-mutating entrypoints
+    ReadOnlyMode,
 }
 
 // ============================================================================
@@ -581,6 +584,15 @@ pub struct MigrationEvent {
     pub migration_hash: BytesN<32>,
     pub success: bool,
     pub error_message: Option<String>,
+}
+
+/// Event emitted when read-only mode is toggled.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReadOnlyModeEvent {
+    pub enabled: bool,
+    pub admin: Address,
+    pub timestamp: u64,
 }
 
 // ============================================================================
@@ -679,6 +691,11 @@ impl GrainlifyContract {
 
         // Set initial version
         env.storage().instance().set(&DataKey::Version, &VERSION);
+
+        // Read-only mode defaults to false
+        env.storage()
+            .instance()
+            .set(&DataKey::ReadOnlyMode, &false);
 
         // Track successful operation
         monitoring::track_operation(&env, symbol_short!("init"), admin, true);
@@ -841,6 +858,8 @@ impl GrainlifyContract {
         // Verify admin authorization
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
+
+        Self::require_not_read_only(&env);
 
         // Store previous version for potential rollback
         let current_version = env.storage().instance().get(&DataKey::Version).unwrap_or(1);
@@ -1010,6 +1029,8 @@ impl GrainlifyContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        Self::require_not_read_only(&env);
+
         // Update version number
         env.storage()
             .instance()
@@ -1021,6 +1042,49 @@ impl GrainlifyContract {
         // Track performance
         let duration = env.ledger().timestamp().saturating_sub(start);
         monitoring::emit_performance(&env, symbol_short!("set_ver"), duration);
+    }
+
+    /// Returns true if the contract is in read-only mode.
+    pub fn is_read_only(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReadOnlyMode)
+            .unwrap_or(false)
+    }
+
+    /// Enable or disable contract-wide read-only mode (admin only).
+    ///
+    /// When enabled, all state-mutating entrypoints reject with "Read-only mode"
+    /// while view calls remain fully functional.
+    pub fn set_read_only_mode(env: Env, enabled: bool) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ReadOnlyMode, &enabled);
+
+        let event = ReadOnlyModeEvent {
+            enabled,
+            admin,
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.events().publish(
+            (symbol_short!("ROModeChg"),),
+            event,
+        );
+    }
+
+    fn require_not_read_only(env: &Env) {
+        let read_only: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReadOnlyMode)
+            .unwrap_or(false);
+        if read_only {
+            panic!("Read-only mode");
+        }
     }
 
     /// Creates an on-chain snapshot of critical core configuration (admin-only).
@@ -1282,6 +1346,8 @@ impl GrainlifyContract {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
+        Self::require_not_read_only(&env);
+
         // Get current version
         let current_version = env.storage().instance().get(&DataKey::Version).unwrap_or(1);
 
@@ -1504,7 +1570,7 @@ mod test {
 
     // WASM for testing
     pub const WASM: &[u8] =
-        include_bytes!("../target/wasm32-unknown-unknown/release/grainlify_core.wasm");
+        include_bytes!("../../target/wasm32-unknown-unknown/release/grainlify_core.wasm");
 
     #[test]
     fn multisig_init_works() {
