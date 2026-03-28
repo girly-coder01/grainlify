@@ -227,7 +227,7 @@ mod monitoring {
 
     // Get analytics
     #[allow(dead_code)]
-    pub fn get_analytics(env: &Env) -> Analytics {
+    pub fn get_escrow_analytics(env: &Env) -> Analytics {
         let op_key = Symbol::new(env, OPERATION_COUNT);
         let usr_key = Symbol::new(env, USER_COUNT);
         let err_key = Symbol::new(env, ERROR_COUNT);
@@ -1054,8 +1054,8 @@ impl BountyEscrowContract {
         monitoring::health_check(&env)
     }
 
-    pub fn get_analytics(env: Env) -> monitoring::Analytics {
-        monitoring::get_analytics(&env)
+    pub fn get_escrow_analytics_v2(env: Env) -> monitoring::Analytics {
+        monitoring::get_escrow_analytics(&env)
     }
 
     pub fn get_state_snapshot(env: Env) -> monitoring::StateSnapshot {

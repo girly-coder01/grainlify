@@ -2168,13 +2168,13 @@ impl ProgramEscrowContract {
             })
     }
 
-    pub fn get_analytics(_env: Env) -> Analytics {
+    pub fn get_program_analytics(_env: Env) -> Analytics {
         Analytics {
             total_locked: 0,
             total_released: 0,
-            total_payouts: 0,
-            active_programs: 0,
-            operation_count: 0,
+            total_refunded: 0,
+            active_escrows: 0,
+            last_updated: 0,
         }
     }
 
