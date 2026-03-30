@@ -274,51 +274,6 @@ mod monitoring {
             0
         };
 
-        Analytics {
-            operation_count: ops,
-            unique_users: users,
-            error_count: errors,
-            error_rate,
-        }
-    }
-
-    // Get state snapshot
-    #[allow(dead_code)]
-    pub fn get_state_snapshot(env: &Env) -> StateSnapshot {
-        let op_key = Symbol::new(env, OPERATION_COUNT);
-        let usr_key = Symbol::new(env, USER_COUNT);
-        let err_key = Symbol::new(env, ERROR_COUNT);
-
-        StateSnapshot {
-            timestamp: env.ledger().timestamp(),
-            total_operations: env.storage().persistent().get(&op_key).unwrap_or(0),
-            total_users: env.storage().persistent().get(&usr_key).unwrap_or(0),
-            total_errors: env.storage().persistent().get(&err_key).unwrap_or(0),
-        }
-    }
-
-    // Get performance stats
-    #[allow(dead_code)]
-    pub fn get_performance_stats(env: &Env, function_name: Symbol) -> PerformanceStats {
-        let count_key = (Symbol::new(env, "perf_cnt"), function_name.clone());
-        let time_key = (Symbol::new(env, "perf_time"), function_name.clone());
-        let last_key = (Symbol::new(env, "perf_last"), function_name.clone());
-
-        let count: u64 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        let total: u64 = env.storage().persistent().get(&time_key).unwrap_or(0);
-        let last: u64 = env.storage().persistent().get(&last_key).unwrap_or(0);
-
-        let avg = if count > 0 { total / count } else { 0 };
-
-        PerformanceStats {
-            function_name,
-            call_count: count,
-            total_time: total,
-            avg_time: avg,
-            last_called: last,
-        }
-    }
-}
 
 mod anti_abuse {
     use soroban_sdk::{contracttype, symbol_short, Address, Env};
@@ -553,9 +508,6 @@ const DEFAULT_DELAY: u64 = 86_400;
 /// Maximum timelock delay in seconds (30 days)
 const MAX_DELAY: u64 = 2_592_000;
 
-extern crate grainlify_core;
-use grainlify_core::asset;
-use grainlify_core::pseudo_randomness;
 
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1189,17 +1141,11 @@ pub struct BountyEscrowContract;
 
 #[contractimpl]
 impl BountyEscrowContract {
-    pub fn health_check(env: Env) -> monitoring::HealthStatus {
-        monitoring::health_check(&env)
+    /// Get the current admin address (view function)
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
     }
 
-    pub fn get_escrow_analytics_v2(env: Env) -> monitoring::Analytics {
-        monitoring::get_escrow_analytics(&env)
-    }
-
-    pub fn get_state_snapshot(env: Env) -> monitoring::StateSnapshot {
-        monitoring::get_state_snapshot(&env)
-    }
     /// Enable or disable the on-chain append-only audit log (Admin only).
     pub fn set_audit_enabled(env: Env, enabled: bool) -> Result<(), Error> {
         let admin: Address = env
@@ -3402,7 +3348,7 @@ impl BountyEscrowContract {
     ///
     /// Precedence: `TokenFeeConfig(token)` > global `FeeConfig`.
     fn resolve_fee_config(env: &Env) -> (i128, i128, i128, i128, Address, bool) {
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr = env.storage().instance().get::<DataKey, Address>(&DataKey::Token).unwrap();
         if let Some(tok_cfg) = env
             .storage()
             .instance()
@@ -3549,10 +3495,7 @@ impl BountyEscrowContract {
         amount: i128,
         deadline: u64,
     ) -> Result<(), Error> {
-        let res =
-            Self::lock_funds_logic(env.clone(), depositor.clone(), bounty_id, amount, deadline);
-        monitoring::track_operation(&env, symbol_short!("lock"), depositor, res.is_ok());
-        res
+        Self::lock_funds_logic(env, depositor, bounty_id, amount, deadline)
     }
 
     fn lock_funds_logic(
@@ -3633,7 +3576,7 @@ impl BountyEscrowContract {
         }
         soroban_sdk::log!(&env, "bounty exists ok");
 
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr = env.storage().instance().get::<DataKey, Address>(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
         soroban_sdk::log!(&env, "token client ok");
 
@@ -4068,14 +4011,12 @@ impl BountyEscrowContract {
     /// # Security
     /// Reentrancy guard is always cleared before any explicit error return after acquisition.
     pub fn publish(env: Env, bounty_id: u64) -> Result<(), Error> {
-        let caller = env
+        let _caller = env
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::Admin)
             .expect("Admin not set");
-        let res = Self::publish_logic(env.clone(), bounty_id, caller.clone());
-        monitoring::track_operation(&env, symbol_short!("publish"), caller, res.is_ok());
-        res
+        Self::publish_logic(env, bounty_id, _caller)
     }
 
     fn publish_logic(env: Env, bounty_id: u64, publisher: Address) -> Result<(), Error> {
@@ -4125,14 +4066,12 @@ impl BountyEscrowContract {
     }
 
     pub fn release_funds(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
-        let caller = env
+        let _caller = env
             .storage()
             .instance()
             .get::<DataKey, Address>(&DataKey::Admin)
             .unwrap_or(contributor.clone());
-        let res = Self::release_funds_logic(env.clone(), bounty_id, contributor);
-        monitoring::track_operation(&env, symbol_short!("release"), caller, res.is_ok());
-        res
+        Self::release_funds_logic(env, bounty_id, contributor)
     }
 
     fn release_funds_logic(env: Env, bounty_id: u64, contributor: Address) -> Result<(), Error> {
@@ -4209,7 +4148,7 @@ impl BountyEscrowContract {
             .set(&DataKey::Escrow(bounty_id), &escrow);
 
         // INTERACTION: external token transfers are last
-        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+        let token_addr = env.storage().instance().get::<DataKey, Address>(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
 
         if release_fee > 0 {
@@ -4662,7 +4601,7 @@ impl BountyEscrowContract {
     pub fn cancel_pending_claim(
         env: Env,
         bounty_id: u64,
-        outcome: DisputeOutcome,
+        _outcome: DisputeOutcome,
     ) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
@@ -4793,7 +4732,7 @@ impl BountyEscrowContract {
         admin.require_auth();
         // Snapshot resource meters for gas cap enforcement (test / testutils only).
         #[cfg(any(test, feature = "testutils"))]
-        let gas_snapshot = gas_budget::capture(&env);
+        let _gas_snapshot = gas_budget::capture(&env);
 
         if !env.storage().persistent().has(&DataKey::Escrow(bounty_id)) {
             return Err(Error::BountyNotFound);
