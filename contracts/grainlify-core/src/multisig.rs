@@ -183,41 +183,38 @@ impl MultiSig {
             .publish((symbol_short!("approved"),), (proposal_id, signer));
     }
 
-    /// Cancels a pending proposal. Any signer may cancel.
-    ///
-    /// # Arguments
-    /// * `proposal_id` - The proposal to cancel.
-    /// * `canceller` - A signer requesting cancellation (requires auth).
-    ///
-    /// # Panics
-    /// - If `canceller` is not in the signer set.
-    /// - If the proposal has already been executed.
-    /// - If the proposal has already been cancelled.
-    pub fn cancel(env: &Env, proposal_id: u64, canceller: Address) {
-        canceller.require_auth();
-
+    /// Emergency pause: authorized multisig signer sets the paused flag.
+    pub fn pause(env: &Env, signer: Address) {
+        signer.require_auth();
         let config = Self::get_config(env);
-        Self::assert_signer(&config, &canceller);
+        Self::assert_signer(&config, &signer);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("paused"),), signer);
+    }
 
-        let mut proposal = Self::get_proposal(env, proposal_id);
+    /// Clears the paused flag after signer authorization.
+    pub fn unpause(env: &Env, signer: Address) {
+        signer.require_auth();
+        let config = Self::get_config(env);
+        Self::assert_signer(&config, &signer);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("unpaused"),), signer);
+    }
 
-        if proposal.executed {
-            panic!("{:?}", MultiSigError::AlreadyExecuted);
-        }
-
-        if proposal.cancelled {
-            // Already cancelled — prevent silent no-op that hides double-cancel bugs.
-            panic!("{:?}", MultiSigError::ProposalCancelled);
-        }
-
-        proposal.cancelled = true;
-
+    /// Returns `true` when emergency pause is active.
+    pub fn is_contract_paused(env: &Env) -> bool {
         env.storage()
             .instance()
-            .set(&DataKey::Proposal(proposal_id), &proposal);
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
 
-        env.events()
-            .publish((symbol_short!("cancelled"),), (proposal_id, canceller));
+    fn is_state_inconsistent(env: &Env) -> bool {
+        let Some(config) = env.storage().instance().get::<DataKey, MultiSigConfig>(&DataKey::Config)
+        else {
+            return false;
+        };
+        config.threshold == 0 || config.threshold > config.signers.len()
     }
 
     /// Returns whether a proposal currently satisfies the execution threshold.
@@ -296,46 +293,6 @@ impl MultiSig {
     /// Clears the multisig configuration for controlled restore flows.
     pub fn clear_config(env: &Env) {
         env.storage().instance().remove(&DataKey::Config);
-    }
-
-    /// Return whether the contract is currently paused.
-    pub fn is_contract_paused(env: &Env) -> bool {
-        env.storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
-    }
-
-    /// Return whether the contract state is inconsistent.
-    pub fn is_state_inconsistent(env: &Env) -> bool {
-        // Check for basic state consistency
-        env.storage()
-            .instance()
-            .get(&DataKey::StateInconsistent)
-            .unwrap_or(false)
-    }
-
-    /// Pause the contract (requires multisig)
-    pub fn pause(env: &Env, signer: Address) {
-        let config = Self::get_config(env);
-        Self::assert_signer(&config, &signer);
-        signer.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &true);
-    }
-
-    /// Unpause the contract (requires multisig)
-    pub fn unpause(env: &Env, signer: Address) {
-        let config = Self::get_config(env);
-        Self::assert_signer(&config, &signer);
-        signer.require_auth();
-        env.storage().instance().set(&DataKey::Paused, &false);
-    }
-
-    /// Returns the raw `Proposal` for inspection (expiry, cancelled, approvals).
-    pub fn get_proposal_opt(env: &Env, proposal_id: u64) -> Option<Proposal> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Proposal(proposal_id))
     }
 
     /// =======================
