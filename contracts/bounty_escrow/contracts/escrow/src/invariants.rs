@@ -22,6 +22,16 @@ fn assert_enabled(env: &Env) {
 #[cfg(not(test))]
 fn assert_enabled(_env: &Env) {}
 
+/// Assert per-escrow invariants (INV-ESC-1 through INV-ESC-4).
+///
+/// Checks:
+/// - INV-ESC-1: amount >= 0
+/// - INV-ESC-2: remaining_amount >= 0
+/// - INV-ESC-3: remaining_amount <= amount
+/// - INV-ESC-4: Released => remaining_amount == 0
+///
+/// # Panics
+/// Panics if any invariant is violated.
 pub(crate) fn assert_escrow(env: &Env, escrow: &Escrow) {
     assert_enabled(env);
     record_call(env);
@@ -64,6 +74,15 @@ pub(crate) fn strict_assert_escrow(env: &Env, escrow: &Escrow) {
     strict_mode::strict_emit(env, symbol_short!("strict"), symbol_short!("esc_chk"));
 }
 
+/// Verify per-escrow invariants (INV-ESC-1 through INV-ESC-4) without panicking.
+///
+/// Returns `true` if all invariants hold, `false` otherwise.
+///
+/// Checks:
+/// - INV-ESC-1: amount >= 0
+/// - INV-ESC-2: remaining_amount >= 0
+/// - INV-ESC-3: remaining_amount <= amount
+/// - INV-ESC-4: Released => remaining_amount == 0
 pub(crate) fn verify_escrow_invariants(escrow: &Escrow) -> bool {
     if escrow.amount < 0 {
         return false;
