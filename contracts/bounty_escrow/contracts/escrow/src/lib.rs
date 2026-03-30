@@ -688,6 +688,10 @@ pub const RISK_FLAG_RESTRICTED: u32 = 1 << 2;
 pub const RISK_FLAG_DEPRECATED: u32 = 1 << 3;
 
 /// Notification preference flags (bitfield).
+/// Current schema version for escrow data structures.
+/// Bump this when the Escrow or AnonymousEscrow layout changes.
+pub const ESCROW_SCHEMA_VERSION: u32 = 1;
+
 pub const NOTIFY_ON_LOCK: u32 = 1 << 0;
 pub const NOTIFY_ON_RELEASE: u32 = 1 << 1;
 pub const NOTIFY_ON_DISPUTE: u32 = 1 << 2;
@@ -728,6 +732,8 @@ pub struct Escrow {
     pub refund_history: Vec<RefundRecord>,
     pub archived: bool,
     pub archived_at: Option<u64>,
+    /// Schema version stamped at creation; immutable after init.
+    pub schema_version: u32,
 }
 
 /// Mutually exclusive participant filtering mode for lock_funds / batch_lock_funds.
@@ -775,6 +781,8 @@ pub struct AnonymousEscrow {
     pub refund_history: Vec<RefundRecord>,
     pub archived: bool,
     pub archived_at: Option<u64>,
+    /// Schema version stamped at creation; immutable after init.
+    pub schema_version: u32,
 }
 
 /// Depositor identity: either a concrete address (non-anon) or a 32-byte commitment (anon).
@@ -795,6 +803,8 @@ pub struct EscrowInfo {
     pub status: EscrowStatus,
     pub deadline: u64,
     pub refund_history: Vec<RefundRecord>,
+    /// Schema version of the underlying escrow record.
+    pub schema_version: u32,
 }
 
 /// Immutable audit record for an escrow-level or address-level freeze.
@@ -2578,6 +2588,7 @@ impl BountyEscrowContract {
                 status: escrow.status,
                 deadline: escrow.deadline,
                 refund_history: escrow.refund_history,
+                schema_version: escrow.schema_version,
             }
         } else if let Some(anon) = env
             .storage()
@@ -2591,6 +2602,7 @@ impl BountyEscrowContract {
                 status: anon.status,
                 deadline: anon.deadline,
                 refund_history: anon.refund_history,
+                schema_version: anon.schema_version,
             }
         } else {
             panic!("bounty not found")
@@ -3467,6 +3479,7 @@ impl BountyEscrowContract {
             remaining_amount: net_amount,
             archived: false,
             archived_at: None,
+            schema_version: ESCROW_SCHEMA_VERSION,
         };
         invariants::assert_escrow(&env, &escrow);
 
@@ -3781,6 +3794,7 @@ impl BountyEscrowContract {
             refund_history: vec![&env],
             archived: false,
             archived_at: None,
+            schema_version: ESCROW_SCHEMA_VERSION,
         };
 
         env.storage()
@@ -5329,6 +5343,7 @@ impl BountyEscrowContract {
                     remaining_amount: item.amount,
                     archived: false,
                     archived_at: None,
+                    schema_version: ESCROW_SCHEMA_VERSION,
                 };
                 invariants::assert_escrow(&env, &escrow);
 
@@ -5932,6 +5947,7 @@ impl BountyEscrowContract {
             remaining_amount: net_amount,
             archived: false,
             archived_at: None,
+            schema_version: ESCROW_SCHEMA_VERSION,
         };
         invariants::assert_escrow(&env, &escrow);
 

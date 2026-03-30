@@ -87,6 +87,7 @@ fn serialization_compatibility_public_types_and_events() {
         deadline,
         // Keep nested vectors minimal in goldens to avoid huge outputs.
         refund_history: soroban_sdk::vec![&env],
+        schema_version: ESCROW_SCHEMA_VERSION,
     };
 
     let samples: &[(&str, Val)] = &[
