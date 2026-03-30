@@ -144,6 +144,8 @@ use soroban_sdk::{
     String, Symbol, Vec,
 };
 
+use grainlify_core::strict_mode;
+
 mod metadata;
 pub use metadata::*;
 
@@ -1376,6 +1378,18 @@ impl ProgramEscrowContract {
                 token_address,
                 total_funds,
             },
+        );
+
+        // Strict mode: verify post-init balance consistency
+        strict_mode::strict_assert_balance_sane(
+            program_data.total_funds,
+            program_data.remaining_balance,
+            "init_program",
+        );
+        strict_mode::strict_assert_eq(
+            program_data.total_funds,
+            program_data.remaining_balance,
+            "init_program: total_funds must equal remaining_balance after init",
         );
 
         program_data
