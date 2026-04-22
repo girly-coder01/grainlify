@@ -529,3 +529,38 @@ fn test_unconfigured_claim_window_passes_validation() {
     let bounty_id = 99; 
     assert_eq!(setup.escrow.validate_claim_window(&bounty_id), ());
 }
+
+// ============================================================================
+// REENTRANCY GUARD TESTS
+// ============================================================================
+
+#[test]
+#[should_panic(expected = "Reentrancy detected")]
+fn test_reentrancy_guard_blocks_reentry() {
+    let setup = TestSetup::new();
+    
+    // 1. Manually lock the guard in the environment
+    let key = symbol_short!("r_guard");
+    setup.env.storage().instance().set(&key, &true);
+    
+    // 2. Attempting to enter the guard while already locked should trigger the panic and event
+    let _guard = super::NonReentrant::enter(&setup.env);
+}
+
+#[test]
+fn test_reentrancy_guard_lifecycle_and_view() {
+    let setup = TestSetup::new();
+    
+    // Verify default unlocked state
+    assert_eq!(setup.escrow.is_reentrancy_guard_locked(), false);
+    
+    {
+        // Scope block to test state
+        setup.env.storage().instance().set(&symbol_short!("r_guard"), &true);
+        assert_eq!(setup.escrow.is_reentrancy_guard_locked(), true);
+    }
+    
+    // Simulate end of scope cleanup
+    setup.env.storage().instance().remove(&symbol_short!("r_guard"));
+    assert_eq!(setup.escrow.is_reentrancy_guard_locked(), false);
+}

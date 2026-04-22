@@ -1430,3 +1430,19 @@ pub fn emit_claim_window_configured(env: &Env, event: ClaimWindowConfigured) {
     let topics = (symbol_short!("clm_win"), event.bounty_id);
     env.events().publish(topics, event);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REENTRANCY GUARD EVENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReentrancyAttemptBlocked {
+    pub version: u32,
+    pub timestamp: u64,
+}
+
+pub fn emit_reentrancy_attempt_blocked(env: &Env, event: ReentrancyAttemptBlocked) {
+    let topics = (symbol_short!("r_guard"),);
+    env.events().publish(topics, event);
+}
