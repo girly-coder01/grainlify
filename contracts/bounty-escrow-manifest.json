@@ -1,7 +1,7 @@
 {
   "$schema": "./contract-manifest-schema.json",
   "contract_name": "BountyEscrowContract",
-  "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
+  "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, two-step admin rotation with timelock, refund-eligibility views, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
   "version": {
     "current": "2.2.0",
     "schema": "1.0.0",
@@ -924,6 +924,14 @@
         "description": "Seconds beneficiary has to claim after authorization",
         "constraints": "value > 0",
         "admin_only": true
+      },
+      {
+        "name": "admin_rotation_timelock_duration",
+        "type": "u64",
+        "default_value": "86400",
+        "description": "Delay in seconds before a pending admin can accept a rotation",
+        "constraints": "3600 <= value <= 2592000",
+        "admin_only": true
       }
     ],
     "storage_keys": [
@@ -1257,6 +1265,99 @@
         "trigger": "Successful refund_funds call"
       },
       {
+        "name": "AdminRotationProposed",
+        "description": "Current admin proposed a pending admin rotation",
+        "data": [
+          {
+            "name": "current_admin",
+            "type": "Address",
+            "description": "Current active admin"
+          },
+          {
+            "name": "pending_admin",
+            "type": "Address",
+            "description": "Pending admin that may accept after the timelock"
+          },
+          {
+            "name": "timelock_duration",
+            "type": "u64",
+            "description": "Configured delay in seconds"
+          },
+          {
+            "name": "execute_after",
+            "type": "u64",
+            "description": "Timestamp when acceptance becomes valid"
+          }
+        ],
+        "trigger": "Successful propose_admin_rotation call"
+      },
+      {
+        "name": "AdminRotationAccepted",
+        "description": "Pending admin accepted and became the new active admin",
+        "data": [
+          {
+            "name": "previous_admin",
+            "type": "Address",
+            "description": "Admin before the rotation completed"
+          },
+          {
+            "name": "new_admin",
+            "type": "Address",
+            "description": "New active admin"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Acceptance timestamp"
+          }
+        ],
+        "trigger": "Successful accept_admin_rotation call"
+      },
+      {
+        "name": "AdminRotationCancelled",
+        "description": "Current admin cancelled a pending admin rotation",
+        "data": [
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Admin that cancelled the pending rotation"
+          },
+          {
+            "name": "cancelled_pending_admin",
+            "type": "Address",
+            "description": "Pending admin that was cleared"
+          },
+          {
+            "name": "timestamp",
+            "type": "u64",
+            "description": "Cancellation timestamp"
+          }
+        ],
+        "trigger": "Successful cancel_admin_rotation call"
+      },
+      {
+        "name": "AdminRotationTimelockUpdated",
+        "description": "Admin-rotation timelock duration was updated",
+        "data": [
+          {
+            "name": "admin",
+            "type": "Address",
+            "description": "Admin that updated the timelock configuration"
+          },
+          {
+            "name": "previous_duration",
+            "type": "u64",
+            "description": "Prior timelock duration"
+          },
+          {
+            "name": "new_duration",
+            "type": "u64",
+            "description": "New timelock duration"
+          }
+        ],
+        "trigger": "Successful set_admin_rotation_timelock_duration call"
+      },
+      {
         "name": "RefundApprovalSet",
         "description": "Admin refund approval created or updated",
         "data": [
@@ -1372,6 +1473,12 @@
           "description": "Set up multisig if required",
           "command": "stellar contract invoke --id CONTRACT_ID -- update_multisig_config --threshold_amount 1000000000 --signers SIGNER1,SIGNER2,SIGNER3 --required_signatures 2",
           "notes": "Optional: configure multisig for large releases"
+        },
+        {
+          "step": 5,
+          "description": "Optionally tune the admin-rotation timelock",
+          "command": "stellar contract invoke --id CONTRACT_ID -- set_admin_rotation_timelock_duration --duration 86400",
+          "notes": "Recommended for governance hardening before transferring long-lived admin control"
         }
       ],
       "prerequisites": [

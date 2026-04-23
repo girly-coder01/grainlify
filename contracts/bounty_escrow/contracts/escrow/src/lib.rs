@@ -35,7 +35,10 @@ use crate::events::{
     emit_maintenance_mode_changed, emit_maintenance_mode_changed_v2,
     emit_notification_preferences_updated,
     emit_participant_filter_mode_changed, emit_risk_flags_updated, emit_ticket_claimed,
-    emit_refund_approval_consumed, emit_refund_approval_set, emit_ticket_issued, BatchFundsLocked,
+    emit_refund_approval_consumed, emit_refund_approval_set, emit_ticket_issued,
+    emit_admin_rotation_accepted, emit_admin_rotation_cancelled, emit_admin_rotation_proposed,
+    emit_admin_rotation_timelock_updated, AdminRotationAccepted, AdminRotationCancelled,
+    AdminRotationProposed, AdminRotationTimelockUpdated, BatchFundsLocked,
     BatchFundsReleased, BountyEscrowInitialized, ClaimCancelled, ClaimCreated, ClaimExecuted,
     CriticalOperationOutcome, DeprecationStateChanged, DeterministicSelectionDerived, FundsLocked,
     FundsLockedAnon, FundsRefunded, FundsReleased, MaintenanceModeChanged, MaintenanceModeChangedV2,
@@ -511,6 +514,9 @@ pub mod rbac {
 const BASIS_POINTS: i128 = 10_000;
 const MAX_FEE_RATE: i128 = 5_000; // 50% max fee
 const MAX_BATCH_SIZE: u32 = 20;
+const DEFAULT_ADMIN_ROTATION_TIMELOCK: u64 = 86_400;
+const MIN_ADMIN_ROTATION_TIMELOCK: u64 = 3_600;
+const MAX_ADMIN_ROTATION_TIMELOCK: u64 = 2_592_000;
 
 extern crate grainlify_core;
 use grainlify_core::asset;
@@ -618,6 +624,16 @@ pub enum Error {
     EscrowFrozen = 45,
     /// Returned when the escrow depositor is explicitly frozen by an admin hold.
     AddressFrozen = 46,
+    /// A prior admin-rotation proposal must be accepted or cancelled first.
+    AdminRotationAlreadyPending = 47,
+    /// No admin-rotation proposal is currently pending.
+    AdminRotationNotPending = 48,
+    /// The pending admin must wait until the scheduled timelock elapses.
+    AdminRotationTimelockActive = 49,
+    /// The configured timelock duration is outside the accepted governance bounds.
+    InvalidAdminRotationTimelock = 50,
+    /// The proposed admin target is invalid for rotation.
+    InvalidAdminRotationTarget = 51,
 }
 
 /// Bit flag: escrow or payout should be treated as elevated risk (indexers, UIs).
@@ -1275,6 +1291,11 @@ impl BountyEscrowContract {
     /// Return the persisted contract version.
     pub fn get_version(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Version).unwrap_or(0)
+    }
+
+    /// Returns the currently active admin, or `None` if the contract is not initialized.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
     }
 
     /// Update the persisted contract version (admin only).
@@ -2177,6 +2198,172 @@ impl BountyEscrowContract {
             },
         );
         Ok(())
+    }
+
+    /// Propose a new admin. The current admin remains active until the pending admin
+    /// explicitly accepts after the configured timelock.
+    pub fn propose_admin_rotation(env: Env, new_admin: Address) -> Result<u64, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if new_admin == admin {
+            return Err(Error::InvalidAdminRotationTarget);
+        }
+
+        if env.storage().instance().has(&DataKey::PendingAdmin) {
+            return Err(Error::AdminRotationAlreadyPending);
+        }
+
+        let timelock_duration = Self::get_admin_rotation_timelock_duration(env.clone());
+        let timestamp = env.ledger().timestamp();
+        let execute_after = timestamp.saturating_add(timelock_duration);
+
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::AdminTimelock, &execute_after);
+
+        emit_admin_rotation_proposed(
+            &env,
+            AdminRotationProposed {
+                version: EVENT_VERSION_V2,
+                current_admin: admin,
+                pending_admin: new_admin,
+                timelock_duration,
+                execute_after,
+                timestamp,
+            },
+        );
+
+        Ok(execute_after)
+    }
+
+    /// Accept a previously proposed admin rotation once the timelock has elapsed.
+    pub fn accept_admin_rotation(env: Env) -> Result<Address, Error> {
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::AdminRotationNotPending)?;
+        let execute_after: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminTimelock)
+            .ok_or(Error::AdminRotationNotPending)?;
+
+        pending_admin.require_auth();
+
+        let timestamp = env.ledger().timestamp();
+        if timestamp < execute_after {
+            return Err(Error::AdminRotationTimelockActive);
+        }
+
+        let previous_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+
+        env.storage().instance().set(&DataKey::Admin, &pending_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::AdminTimelock);
+
+        emit_admin_rotation_accepted(
+            &env,
+            AdminRotationAccepted {
+                version: EVENT_VERSION_V2,
+                previous_admin,
+                new_admin: pending_admin.clone(),
+                timestamp,
+            },
+        );
+
+        Ok(pending_admin)
+    }
+
+    /// Cancel a pending admin rotation while keeping the current admin unchanged.
+    pub fn cancel_admin_rotation(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::AdminRotationNotPending)?;
+
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::AdminTimelock);
+
+        emit_admin_rotation_cancelled(
+            &env,
+            AdminRotationCancelled {
+                version: EVENT_VERSION_V2,
+                admin,
+                cancelled_pending_admin: pending_admin,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Update the global admin-rotation timelock duration.
+    pub fn set_admin_rotation_timelock_duration(env: Env, duration: u64) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if !(MIN_ADMIN_ROTATION_TIMELOCK..=MAX_ADMIN_ROTATION_TIMELOCK).contains(&duration) {
+            return Err(Error::InvalidAdminRotationTimelock);
+        }
+
+        let previous_duration = Self::get_admin_rotation_timelock_duration(env.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::TimelockDuration, &duration);
+
+        emit_admin_rotation_timelock_updated(
+            &env,
+            AdminRotationTimelockUpdated {
+                version: EVENT_VERSION_V2,
+                admin,
+                previous_duration,
+                new_duration: duration,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Returns the configured timelock duration for future admin rotations.
+    pub fn get_admin_rotation_timelock_duration(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TimelockDuration)
+            .unwrap_or(DEFAULT_ADMIN_ROTATION_TIMELOCK)
+    }
+
+    /// Returns the pending admin, if a rotation is currently waiting for acceptance.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    /// Returns the acceptance timestamp for the current pending admin rotation.
+    pub fn get_admin_rotation_timelock(env: Env) -> Option<u64> {
+        env.storage().instance().get(&DataKey::AdminTimelock)
     }
 
     pub fn set_whitelist(env: Env, address: Address, whitelisted: bool) -> Result<(), Error> {

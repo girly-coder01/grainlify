@@ -1,8 +1,8 @@
 use super::*;
-use soroban_sdk::testutils::Ledger;
+use soroban_sdk::testutils::{Events, Ledger};
 use soroban_sdk::{
-    testutils::{Address as _, LedgerInfo},
-    token, Address, Env,
+    testutils::{Address as _, LedgerInfo, MockAuth, MockAuthInvoke},
+    token, Address, Env, IntoVal, Symbol, TryIntoVal, Val,
 };
 
 fn create_token_contract<'a>(
@@ -60,6 +60,64 @@ impl<'a> TestSetup<'a> {
             escrow,
         }
     }
+}
+
+struct RotationSetup<'a> {
+    env: Env,
+    admin: Address,
+    pending_admin: Address,
+    replacement_admin: Address,
+    escrow: BountyEscrowContractClient<'a>,
+}
+
+impl<'a> RotationSetup<'a> {
+    fn new() -> Self {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let pending_admin = Address::generate(&env);
+        let replacement_admin = Address::generate(&env);
+        let (token, _token_admin) = create_token_contract(&env, &admin);
+        let escrow = create_escrow_contract(&env);
+
+        authorize_contract_call(
+            &env,
+            &escrow,
+            &admin,
+            "init",
+            (&admin, &token.address).into_val(&env),
+        );
+        escrow.init(&admin, &token.address);
+
+        Self {
+            env,
+            admin,
+            pending_admin,
+            replacement_admin,
+            escrow,
+        }
+    }
+
+    fn authorize(&self, address: &Address, fn_name: &'static str, args: Val) {
+        authorize_contract_call(&self.env, &self.escrow, address, fn_name, args);
+    }
+}
+
+fn authorize_contract_call(
+    env: &Env,
+    escrow: &BountyEscrowContractClient<'_>,
+    address: &Address,
+    fn_name: &'static str,
+    args: Val,
+) {
+    env.mock_auths(&[MockAuth {
+        address,
+        invoke: &MockAuthInvoke {
+            contract: &escrow.address,
+            fn_name,
+            args,
+            sub_invokes: &[],
+        },
+    }]);
 }
 
 #[test]
