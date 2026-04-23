@@ -2042,6 +2042,7 @@ impl BountyEscrowContract {
                 version: EVENT_VERSION_V2,
                 previous_enabled,
                 enabled,
+                reason,
                 admin: admin.clone(),
                 timestamp: env.ledger().timestamp(),
             },

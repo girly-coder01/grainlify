@@ -309,6 +309,15 @@
         "authorization": "admin",
         "pausable": true,
         "gas_estimate": "high"
+      },
+      {
+        "name": "accept_admin",
+        "description": "Accept a pending admin role after timelock expires",
+        "parameters": [],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "signer",
+        "pausable": false,
+        "gas_estimate": "low"
       }
     ],
     "view": [
