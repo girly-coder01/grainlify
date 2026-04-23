@@ -3,7 +3,7 @@
   "contract_name": "BountyEscrowContract",
   "contract_purpose": "Manages bounty escrow with multi-token support, capability-based authorization, fee configuration, and comprehensive security features including reentrancy protection and rate limiting",
   "version": {
-    "current": "2.0.0",
+    "current": "2.1.1",
     "schema": "1.0.0",
     "history": [
       {
@@ -480,13 +480,25 @@
         "pausable": false,
         "gas_estimate": "low"
       },
-      {
+       {
         "name": "get_analytics",
         "description": "Get usage analytics",
         "parameters": [],
         "returns": {
           "type": "Analytics",
           "description": "Analytics data"
+        },
+        "authorization": "any",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "is_maintenance_mode",
+        "description": "Check if maintenance mode is active",
+        "parameters": [],
+        "returns": {
+          "type": "bool",
+          "description": "True if maintenance mode is enabled, false otherwise"
         },
         "authorization": "any",
         "pausable": false,
@@ -664,9 +676,33 @@
         "authorization": "admin",
         "pausable": false,
         "gas_estimate": "low"
-      },
-      {
-        "name": "emergency_withdraw",
+       },
+       {
+         "name": "set_maintenance_mode",
+         "description": "Update maintenance mode (admin only)",
+         "parameters": [
+           {
+             "name": "enabled",
+             "type": "bool",
+             "description": "Enable or disable maintenance mode"
+           },
+           {
+             "name": "reason",
+             "type": "Option<String>",
+             "description": "Optional reason for the change",
+             "optional": true
+           }
+         ],
+         "returns": {
+           "type": "()",
+           "description": "Empty on success"
+         },
+         "authorization": "admin",
+         "pausable": false,
+         "gas_estimate": "medium"
+       },
+       {
+         "name": "emergency_withdraw",
         "description": "Emergency withdraw all funds (requires lock_paused=true)",
         "parameters": [
           {

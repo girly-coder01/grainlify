@@ -789,6 +789,8 @@ pub fn emit_deprecation_state_changed(env: &Env, event: DeprecationStateChanged)
 pub struct MaintenanceModeChanged {
     pub enabled: bool,
     pub admin: Address,
+    /// Optional reason provided by the admin for enabling/disabling maintenance.
+    pub reason: Option<soroban_sdk::String>,
     pub timestamp: u64,
 }
 

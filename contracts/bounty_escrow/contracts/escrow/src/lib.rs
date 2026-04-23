@@ -33,8 +33,8 @@ use crate::events::{
     emit_deprecation_state_changed, emit_deterministic_selection, emit_funds_locked,
     emit_funds_locked_anon, emit_funds_refunded, emit_funds_released,
     emit_maintenance_mode_changed, emit_notification_preferences_updated,
-    emit_participant_filter_mode_changed, emit_risk_flags_updated, emit_ticket_claimed,
-    emit_refund_approval_consumed, emit_refund_approval_set, emit_ticket_issued, BatchFundsLocked,
+    emit_participant_filter_mode_changed, emit_refund_approval_consumed, emit_refund_approval_set,
+    emit_risk_flags_updated, emit_ticket_claimed, emit_ticket_issued, BatchFundsLocked,
     BatchFundsReleased, BountyEscrowInitialized, ClaimCancelled, ClaimCreated, ClaimExecuted,
     CriticalOperationOutcome, DeprecationStateChanged, DeterministicSelectionDerived, FundsLocked,
     FundsLockedAnon, FundsRefunded, FundsReleased, MaintenanceModeChanged,
@@ -1970,7 +1970,11 @@ impl BountyEscrowContract {
     }
 
     /// Update maintenance mode (admin only)
-    pub fn set_maintenance_mode(env: Env, enabled: bool) -> Result<(), Error> {
+    pub fn set_maintenance_mode(
+        env: Env,
+        enabled: bool,
+        reason: Option<String>,
+    ) -> Result<(), Error> {
         if !env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::NotInitialized);
         }
@@ -1986,6 +1990,7 @@ impl BountyEscrowContract {
             MaintenanceModeChanged {
                 enabled,
                 admin: admin.clone(),
+                reason,
                 timestamp: env.ledger().timestamp(),
             },
         );
@@ -3834,7 +3839,11 @@ impl BountyEscrowContract {
             };
         }
 
-        if env.storage().persistent().has(&DataKey::EscrowAnon(bounty_id)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::EscrowAnon(bounty_id))
+        {
             let anon: AnonymousEscrow = env
                 .storage()
                 .persistent()
@@ -3895,7 +3904,8 @@ impl BountyEscrowContract {
                 approval_present: false,
             };
         }
-        if escrow.status != EscrowStatus::Locked && escrow.status != EscrowStatus::PartiallyRefunded {
+        if escrow.status != EscrowStatus::Locked && escrow.status != EscrowStatus::PartiallyRefunded
+        {
             return RefundEligibilityView {
                 eligible: false,
                 code: RefundEligibilityCode::IneligibleInvalidStatus,
@@ -4002,7 +4012,11 @@ impl BountyEscrowContract {
             view.eligible,
             deadline_passed,
             view.amount,
-            if view.approval_present { approval } else { None },
+            if view.approval_present {
+                approval
+            } else {
+                None
+            },
         )
     }
 
@@ -6510,9 +6524,15 @@ mod test_dry_run_simulation;
 #[cfg(test)]
 mod test_e2e_upgrade_with_pause;
 #[cfg(test)]
+mod test_escrow_expiry;
+#[cfg(test)]
+mod test_max_counts;
+#[cfg(test)]
 mod test_query_filters;
 #[cfg(test)]
 mod test_receipts;
+#[cfg(test)]
+mod test_recurring_locks;
 #[cfg(test)]
 mod test_sandbox;
 #[cfg(test)]
@@ -6521,9 +6541,3 @@ mod test_serialization_compatibility;
 mod test_status_transitions;
 #[cfg(test)]
 mod test_upgrade_scenarios;
-#[cfg(test)]
-mod test_escrow_expiry;
-#[cfg(test)]
-mod test_max_counts;
-#[cfg(test)]
-mod test_recurring_locks;
