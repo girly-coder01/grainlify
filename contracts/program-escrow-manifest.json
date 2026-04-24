@@ -3,7 +3,7 @@
   "contract_name": "ProgramEscrowContract",
   "contract_purpose": "Handles hackathon and program prize pools with batch payouts, dependency management, circuit breaker protection, and comprehensive monitoring",
   "version": {
-    "current": "2.4.0",
+    "current": "2.5.0",
     "schema": "1.0.0",
     "history": [
       {
@@ -71,6 +71,19 @@
           "Added get_pause_schema_version() view entrypoint — returns 0 for legacy pre-v1 contracts",
           "Pause checks remain deterministic: release_paused blocks single_payout and batch_payout; lock_paused blocks lock_program_funds; flags are orthogonal",
           "Added 16 targeted tests in test.rs covering pause invariants, V2 event fields, schema version, and edge cases"
+        ]
+      },
+      {
+        "version": "2.5.0",
+        "release_date": "2026-04-24",
+        "changes": [
+          "Added two-step admin rotation: propose_admin / accept_admin / cancel_admin_rotation",
+          "Added two-step per-program controller rotation: propose_controller / accept_controller / cancel_controller_rotation",
+          "Added DataKey::PendingAdmin (instance storage) for pending admin handoff",
+          "Added DataKey::PendingController(String) (instance storage) for pending controller handoff per program",
+          "Added 6 audit events: AdminProposedEvent, AdminAcceptedEvent, AdminRotationCancelledEvent, ControllerProposedEvent, ControllerAcceptedEvent, ControllerRotationCancelledEvent",
+          "Added ContractError codes: AdminRotationPending=1200, NoPendingAdminRotation=1201, ControllerRotationPending=1202, NoPendingControllerRotation=1203",
+          "Added 12 targeted tests (RC-01..RC-12) covering propose/accept/cancel paths, duplicate-pending panics, no-pending panics, and state invariants"
         ]
       }
           "Deterministic error ordering preserved: threshold check runs before balance and circuit-breaker checks"
@@ -605,6 +618,99 @@
         "gas_estimate": "low"
       },
       {
+        "name": "propose_admin",
+        "description": "Propose a new admin (two-step rotation step 1). Current admin must authorize. Panics if a rotation is already pending.",
+        "parameters": [
+          {
+            "name": "proposed_admin",
+            "type": "Address",
+            "description": "Address being proposed as the next admin"
+          }
+        ],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "accept_admin",
+        "description": "Accept the proposed admin role (step 2). Proposed admin must authorize. Panics if no rotation is pending.",
+        "parameters": [],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "proposed_admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "cancel_admin_rotation",
+        "description": "Cancel a pending admin rotation. Current admin must authorize. Panics if no rotation is pending.",
+        "parameters": [],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "propose_controller",
+        "description": "Propose a new authorized_payout_key for a program (step 1). Current controller or admin must authorize. Panics if a rotation is already pending.",
+        "parameters": [
+          {
+            "name": "program_id",
+            "type": "String",
+            "description": "Program identifier"
+          },
+          {
+            "name": "caller",
+            "type": "Address",
+            "description": "Current controller or admin"
+          },
+          {
+            "name": "proposed_controller",
+            "type": "Address",
+            "description": "Address being proposed as the next controller"
+          }
+        ],
+        "returns": { "type": "ProgramData", "description": "Current program data" },
+        "authorization": "controller_or_admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "accept_controller",
+        "description": "Accept the proposed controller role for a program (step 2). Proposed controller must authorize. Panics if no rotation is pending.",
+        "parameters": [
+          {
+            "name": "program_id",
+            "type": "String",
+            "description": "Program identifier"
+          }
+        ],
+        "returns": { "type": "ProgramData", "description": "Updated program data with new controller" },
+        "authorization": "proposed_controller",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
+        "name": "cancel_controller_rotation",
+        "description": "Cancel a pending controller rotation. Current controller or admin must authorize. Panics if no rotation is pending.",
+        "parameters": [
+          {
+            "name": "program_id",
+            "type": "String",
+            "description": "Program identifier"
+          },
+          {
+            "name": "caller",
+            "type": "Address",
+            "description": "Current controller or admin"
+          }
+        ],
+        "returns": { "type": "ProgramData", "description": "Current program data" },
+        "authorization": "controller_or_admin",
+        "pausable": false,
+        "gas_estimate": "low"
+      },
+      {
         "name": "set_circuit_admin",
         "description": "Set circuit breaker admin",
         "parameters": [
@@ -809,6 +915,18 @@
         "data_structure": "Address"
       },
       {
+        "name": "DataKey::PendingAdmin",
+        "type": "instance",
+        "description": "Proposed next admin address for two-step rotation. Present only while a rotation is in progress; removed on accept or cancel.",
+        "data_structure": "Address"
+      },
+      {
+        "name": "DataKey::PendingController(String)",
+        "type": "instance",
+        "description": "Proposed next authorized_payout_key for a program. Key is program_id. Present only while a rotation is in progress; removed on accept or cancel.",
+        "data_structure": "Address"
+      },
+      {
         "name": "DataKey::PauseFlags",
         "type": "instance",
         "description": "Pause configuration",
@@ -927,6 +1045,30 @@
         "error_code": "DependencyCycle",
         "scenario": "Creating circular dependencies between programs",
         "resolution": "Remove circular dependency references"
+      },
+      {
+        "error_code": "AdminRotationPending",
+        "numeric_code": 1200,
+        "scenario": "propose_admin called while a rotation is already pending",
+        "resolution": "Cancel the existing proposal with cancel_admin_rotation before proposing a new one"
+      },
+      {
+        "error_code": "NoPendingAdminRotation",
+        "numeric_code": 1201,
+        "scenario": "accept_admin or cancel_admin_rotation called with no pending rotation",
+        "resolution": "Call propose_admin first"
+      },
+      {
+        "error_code": "ControllerRotationPending",
+        "numeric_code": 1202,
+        "scenario": "propose_controller called while a rotation is already pending for that program",
+        "resolution": "Cancel the existing proposal with cancel_controller_rotation before proposing a new one"
+      },
+      {
+        "error_code": "NoPendingControllerRotation",
+        "numeric_code": 1203,
+        "scenario": "accept_controller or cancel_controller_rotation called with no pending rotation",
+        "resolution": "Call propose_controller first"
       }
     ],
     "gas_considerations": [

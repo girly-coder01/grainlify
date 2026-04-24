@@ -605,6 +605,30 @@ pub enum ContractError {
     /// This error occurs when a batch item has exceeded
     /// the maximum number of retry attempts.
     MaxRetriesExceeded = 1012,
+
+    // =========================================================================
+    // Role Rotation Errors (1200-1299)
+    // =========================================================================
+
+    /// An admin rotation is already pending.
+    ///
+    /// Cancel the existing proposal before proposing a new one.
+    AdminRotationPending = 1200,
+
+    /// No admin rotation is pending.
+    ///
+    /// Call propose_admin before accept_admin or cancel_admin_rotation.
+    NoPendingAdminRotation = 1201,
+
+    /// A controller rotation is already pending for this program.
+    ///
+    /// Cancel the existing proposal before proposing a new one.
+    ControllerRotationPending = 1202,
+
+    /// No controller rotation is pending for this program.
+    ///
+    /// Call propose_controller before accept_controller or cancel_controller_rotation.
+    NoPendingControllerRotation = 1203,
 }
 
 impl ContractError {
@@ -725,6 +749,12 @@ impl ContractError {
             ContractError::BatchItemNotFound => "Batch item not found",
             ContractError::BatchItemAlreadyProcessed => "Batch item already processed",
             ContractError::MaxRetriesExceeded => "Maximum retries exceeded",
+
+            // Role Rotation Errors
+            ContractError::AdminRotationPending => "Admin rotation already pending",
+            ContractError::NoPendingAdminRotation => "No pending admin rotation",
+            ContractError::ControllerRotationPending => "Controller rotation already pending",
+            ContractError::NoPendingControllerRotation => "No pending controller rotation",
         }
     }
     

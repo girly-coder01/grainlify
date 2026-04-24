@@ -3039,3 +3039,206 @@ fn test_pause_reason_cleared_on_full_unpause() {
     let flags = client.get_pause_flags();
     assert_eq!(flags.pause_reason, None, "reason must be cleared when fully unpaused");
 }
+
+// =============================================================================
+// Role Separation + Controller Rotation Tests (RC-01 … RC-12)
+// =============================================================================
+
+/// RC-01: propose_admin stores pending admin and emits event.
+#[test]
+fn test_propose_admin_stores_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.initialize_contract(&admin);
+
+    client.propose_admin(&new_admin);
+
+    // Admin must still be the original until accepted.
+    assert_eq!(client.get_admin(), Some(admin));
+
+    let events = env.events().all();
+    assert!(events.len() >= 1);
+}
+
+/// RC-02: accept_admin rotates admin to proposed address.
+#[test]
+fn test_accept_admin_rotates_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.initialize_contract(&admin);
+    client.propose_admin(&new_admin);
+    client.accept_admin();
+
+    assert_eq!(client.get_admin(), Some(new_admin));
+}
+
+/// RC-03: accept_admin panics when no rotation is pending.
+#[test]
+#[should_panic(expected = "No pending admin rotation")]
+fn test_accept_admin_no_pending_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize_contract(&admin);
+    client.accept_admin();
+}
+
+/// RC-04: propose_admin panics when a rotation is already pending.
+#[test]
+#[should_panic(expected = "Admin rotation already pending")]
+fn test_propose_admin_duplicate_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    let another = Address::generate(&env);
+    client.initialize_contract(&admin);
+    client.propose_admin(&new_admin);
+    client.propose_admin(&another); // must panic
+}
+
+/// RC-05: cancel_admin_rotation clears pending admin.
+#[test]
+fn test_cancel_admin_rotation_clears_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.initialize_contract(&admin);
+    client.propose_admin(&new_admin);
+    client.cancel_admin_rotation();
+
+    // After cancel, a new proposal must succeed.
+    let another = Address::generate(&env);
+    client.propose_admin(&another);
+    assert_eq!(client.get_admin(), Some(admin));
+}
+
+/// RC-06: cancel_admin_rotation panics when no rotation is pending.
+#[test]
+#[should_panic(expected = "No pending admin rotation")]
+fn test_cancel_admin_rotation_no_pending_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, ProgramEscrowContract);
+    let client = ProgramEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize_contract(&admin);
+    client.cancel_admin_rotation();
+}
+
+/// RC-07: propose_controller stores pending controller and emits event.
+#[test]
+fn test_propose_controller_stores_pending() {
+    let env = Env::default();
+    let (client, admin, _token, _token_admin) = setup_program(&env, 0);
+
+    let new_controller = Address::generate(&env);
+    let program_id = String::from_str(&env, "hack-2026");
+
+    client.propose_controller(&program_id, &admin, &new_controller);
+
+    // authorized_payout_key must still be the original.
+    let info = client.get_program_info();
+    assert_eq!(info.authorized_payout_key, admin);
+
+    let events = env.events().all();
+    assert!(events.len() >= 1);
+}
+
+/// RC-08: accept_controller rotates authorized_payout_key.
+#[test]
+fn test_accept_controller_rotates_key() {
+    let env = Env::default();
+    let (client, admin, _token, _token_admin) = setup_program(&env, 0);
+
+    let new_controller = Address::generate(&env);
+    let program_id = String::from_str(&env, "hack-2026");
+
+    client.propose_controller(&program_id, &admin, &new_controller);
+    client.accept_controller(&program_id);
+
+    let info = client.get_program_info();
+    assert_eq!(info.authorized_payout_key, new_controller);
+}
+
+/// RC-09: accept_controller panics when no rotation is pending.
+#[test]
+#[should_panic(expected = "No pending controller rotation")]
+fn test_accept_controller_no_pending_panics() {
+    let env = Env::default();
+    let (client, _admin, _token, _token_admin) = setup_program(&env, 0);
+
+    let program_id = String::from_str(&env, "hack-2026");
+    client.accept_controller(&program_id);
+}
+
+/// RC-10: propose_controller panics when a rotation is already pending.
+#[test]
+#[should_panic(expected = "Controller rotation already pending")]
+fn test_propose_controller_duplicate_panics() {
+    let env = Env::default();
+    let (client, admin, _token, _token_admin) = setup_program(&env, 0);
+
+    let program_id = String::from_str(&env, "hack-2026");
+    let c1 = Address::generate(&env);
+    let c2 = Address::generate(&env);
+
+    client.propose_controller(&program_id, &admin, &c1);
+    client.propose_controller(&program_id, &admin, &c2); // must panic
+}
+
+/// RC-11: cancel_controller_rotation clears pending controller.
+#[test]
+fn test_cancel_controller_rotation_clears_pending() {
+    let env = Env::default();
+    let (client, admin, _token, _token_admin) = setup_program(&env, 0);
+
+    let program_id = String::from_str(&env, "hack-2026");
+    let c1 = Address::generate(&env);
+    client.propose_controller(&program_id, &admin, &c1);
+    client.cancel_controller_rotation(&program_id, &admin);
+
+    // After cancel, a new proposal must succeed.
+    let c2 = Address::generate(&env);
+    client.propose_controller(&program_id, &admin, &c2);
+    let info = client.get_program_info();
+    assert_eq!(info.authorized_payout_key, admin); // still original until accepted
+}
+
+/// RC-12: cancel_controller_rotation panics when no rotation is pending.
+#[test]
+#[should_panic(expected = "No pending controller rotation")]
+fn test_cancel_controller_rotation_no_pending_panics() {
+    let env = Env::default();
+    let (client, admin, _token, _token_admin) = setup_program(&env, 0);
+
+    let program_id = String::from_str(&env, "hack-2026");
+    client.cancel_controller_rotation(&program_id, &admin);
+}
