@@ -911,6 +911,26 @@
         "authorization": "admin",
         "pausable": false,
         "gas_estimate": "low"
+      },
+      {
+        "name": "set_batch_size_caps",
+        "description": "Set independent runtime caps for batch_lock_funds and batch_release_funds. Both caps must satisfy 1 <= cap <= MAX_BATCH_SIZE (20). Emits BatchSizeCapsUpdated.",
+        "parameters": [
+          {
+            "name": "lock_cap",
+            "type": "u32",
+            "description": "Maximum items allowed in a single batch_lock_funds call (1..=20)"
+          },
+          {
+            "name": "release_cap",
+            "type": "u32",
+            "description": "Maximum items allowed in a single batch_release_funds call (1..=20)"
+          }
+        ],
+        "returns": { "type": "()", "description": "Empty on success" },
+        "authorization": "admin",
+        "pausable": false,
+        "gas_estimate": "low"
       }
     ]
   },
