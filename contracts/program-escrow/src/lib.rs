@@ -3591,6 +3591,8 @@ impl ProgramEscrowContract {
     /// empty (enforcement disabled).
     ///
     /// This is a pure view — no auth required.
+    /// Returns true if the token is allowed for program initialization.
+    /// Implements issue #1051: Token allowlist enforcement.
     pub fn is_token_allowed(env: Env, token: Address) -> bool {
         let allowlist = Self::get_token_allowlist_internal(&env);
         if allowlist.is_empty() {
